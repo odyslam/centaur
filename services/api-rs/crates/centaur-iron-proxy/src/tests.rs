@@ -62,3 +62,25 @@ fn access_token_fragment_carries_no_broker_credentials_block() {
         .unwrap();
     assert!(!codex.top_level.contains_key("broker_credentials"));
 }
+
+#[test]
+fn base_proxy_config_allows_project_access_token_header() {
+    let cfg: ProxyFragment =
+        serde_yaml::from_str(include_str!("../../../../../services/iron-proxy/iron-proxy.yaml"))
+            .unwrap();
+    let header_allowlist = cfg
+        .transforms
+        .iter()
+        .find(|transform| transform.name == "header_allowlist")
+        .unwrap();
+    let headers = header_allowlist
+        .config
+        .extra
+        .get("headers")
+        .and_then(serde_yaml::Value::as_sequence)
+        .unwrap();
+
+    assert!(headers
+        .iter()
+        .any(|header| header.as_str() == Some("project-access-token")));
+}
