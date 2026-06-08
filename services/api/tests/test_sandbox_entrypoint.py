@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tomllib
 from pathlib import Path
 
 
 ENTRYPOINT_SH = Path(__file__).resolve().parents[2] / "sandbox" / "entrypoint.sh"
+CODEX_CONFIG = Path(__file__).resolve().parents[3] / "harness" / "codex" / "config.toml"
 
 
 def _write_codex_harness_config(home: Path) -> Path:
@@ -135,3 +137,11 @@ def test_sandbox_entrypoint_installs_codex_harness_config(tmp_path: Path) -> Non
 
     assert result.returncode == 0, result.stderr or result.stdout
     assert result.stdout == (harness_dir / "codex" / "config.toml").read_text()
+
+
+def test_codex_harness_config_disables_hosted_apps() -> None:
+    """Sandbox agents should route integrations through Centaur tools."""
+
+    config = tomllib.loads(CODEX_CONFIG.read_text())
+    assert config["features"]["apps"] is False
+    assert config["features"]["enable_mcp_apps"] is False
