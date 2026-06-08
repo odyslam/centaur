@@ -107,6 +107,14 @@ fn fake_claude_app_server_streams_codex_v2_notifications() {
 }
 
 #[test]
+fn codex_harness_config_disables_hosted_apps() {
+    let config = include_str!("../../../harness/codex/config.toml");
+
+    assert!(config.contains("\napps = false\n"));
+    assert!(config.contains("\nenable_mcp_apps = false\n"));
+}
+
+#[test]
 fn fake_amp_app_server_streams_codex_v2_notifications() {
     let fake_amp = concat!(
         "printf '%s\\n' ",
