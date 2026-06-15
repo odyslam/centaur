@@ -553,6 +553,11 @@ struct SandboxArgs {
     /// `OTEL_SERVICE_NAME`, NO_PROXY extras) into every codex sandbox.
     #[arg(long = "session-sandbox-extra-env", env = "SESSION_SANDBOX_EXTRA_ENV")]
     extra_env_json: Option<String>,
+    #[arg(
+        long = "session-sandbox-bind-mounts",
+        env = "SESSION_SANDBOX_BIND_MOUNTS"
+    )]
+    session_sandbox_bind_mounts: Option<String>,
     #[command(flatten)]
     tools: ToolDiscoveryArgs,
     #[command(flatten)]
@@ -802,14 +807,14 @@ impl SandboxArgs {
         let Some(value) = clean_optional_value(self.workflow_host_bind_mounts.as_deref()) else {
             return Ok(Vec::new());
         };
-        let mounts: Vec<WorkflowHostBindMountArg> =
-            serde_json::from_str(&value).map_err(|err| {
-                ServerError::UnsupportedConfig(format!("invalid WORKFLOW_HOST_BIND_MOUNTS: {err}"))
-            })?;
-        mounts
-            .into_iter()
-            .map(WorkflowHostBindMountArg::into_mount)
-            .collect()
+        parse_bind_mounts(&value, "WORKFLOW_HOST_BIND_MOUNTS")
+    }
+
+    fn session_sandbox_bind_mounts(&self) -> Result<Vec<Mount>, ServerError> {
+        let Some(value) = clean_optional_value(self.session_sandbox_bind_mounts.as_deref()) else {
+            return Ok(Vec::new());
+        };
+        parse_bind_mounts(&value, "SESSION_SANDBOX_BIND_MOUNTS")
     }
 
     fn default_workflow_host_path(&self) -> String {
@@ -867,6 +872,9 @@ impl SandboxArgs {
                         )
                         .read_only(),
                     );
+                }
+                for mount in self.session_sandbox_bind_mounts()? {
+                    workload = workload.mount(mount);
                 }
                 Ok(workload)
             }
@@ -1344,26 +1352,22 @@ struct ToolSourceArg {
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct WorkflowHostBindMountArg {
+struct BindMountArg {
     source_path: String,
     target_path: String,
     #[serde(default)]
     read_only: bool,
 }
 
-impl WorkflowHostBindMountArg {
-    fn into_mount(self) -> Result<Mount, ServerError> {
+impl BindMountArg {
+    fn into_mount(self, config_name: &str) -> Result<Mount, ServerError> {
         let source_path =
             clean_optional_value(Some(self.source_path.as_str())).ok_or_else(|| {
-                ServerError::UnsupportedConfig(
-                    "WORKFLOW_HOST_BIND_MOUNTS entries require source_path".to_owned(),
-                )
+                ServerError::UnsupportedConfig(format!("{config_name} entries require source_path"))
             })?;
         let target_path =
             clean_optional_value(Some(self.target_path.as_str())).ok_or_else(|| {
-                ServerError::UnsupportedConfig(
-                    "WORKFLOW_HOST_BIND_MOUNTS entries require target_path".to_owned(),
-                )
+                ServerError::UnsupportedConfig(format!("{config_name} entries require target_path"))
             })?;
         let mut mount = Mount::new(MountKind::Bind { source_path }, target_path);
         if self.read_only {
@@ -1371,6 +1375,15 @@ impl WorkflowHostBindMountArg {
         }
         Ok(mount)
     }
+}
+
+fn parse_bind_mounts(value: &str, config_name: &str) -> Result<Vec<Mount>, ServerError> {
+    let mounts: Vec<BindMountArg> = serde_json::from_str(value)
+        .map_err(|err| ServerError::UnsupportedConfig(format!("invalid {config_name}: {err}")))?;
+    mounts
+        .into_iter()
+        .map(|mount| mount.into_mount(config_name))
+        .collect()
 }
 
 impl ToolSourceArg {
@@ -2382,6 +2395,8 @@ mod tests {
             "codex-app-server",
             "--repos-path",
             "/var/lib/centaur/repos",
+            "--session-sandbox-bind-mounts",
+            r#"[{"source_path":"/var/lib/opensre-runs","target_path":"/var/lib/opensre-runs","read_only":true}]"#,
         ])
         .unwrap();
 
@@ -2396,6 +2411,14 @@ mod tests {
                 && mount.kind
                     == (MountKind::Bind {
                         source_path: "/var/lib/centaur/repos".to_owned(),
+                    })
+        }));
+        assert!(mounts.iter().any(|mount| {
+            mount.target_path == "/var/lib/opensre-runs"
+                && mount.read_only
+                && mount.kind
+                    == (MountKind::Bind {
+                        source_path: "/var/lib/opensre-runs".to_owned(),
                     })
         }));
     }
