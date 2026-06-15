@@ -173,6 +173,12 @@ pub enum WorkflowWebhookAuth {
     Bearer {
         secret_ref: String,
     },
+    SharedSecret {
+        secret_ref: String,
+        header: String,
+        #[serde(default)]
+        fallback_secret_refs: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -779,6 +785,27 @@ fn normalize_webhook(webhook: &mut RegisteredWorkflowWebhook) -> Result<(), Work
             if secret_ref.trim().is_empty() {
                 return Err(WorkflowRuntimeError::BadRequest(format!(
                     "workflow webhook {:?} auth requires secret_ref",
+                    webhook.spec.slug
+                )));
+            }
+        }
+        WorkflowWebhookAuth::SharedSecret {
+            secret_ref,
+            header,
+            fallback_secret_refs,
+        } => {
+            if secret_ref.trim().is_empty() || header.trim().is_empty() {
+                return Err(WorkflowRuntimeError::BadRequest(format!(
+                    "workflow webhook {:?} shared_secret auth requires secret_ref and header",
+                    webhook.spec.slug
+                )));
+            }
+            if fallback_secret_refs
+                .iter()
+                .any(|secret_ref| secret_ref.trim().is_empty())
+            {
+                return Err(WorkflowRuntimeError::BadRequest(format!(
+                    "workflow webhook {:?} shared_secret fallback_secret_refs must not be empty",
                     webhook.spec.slug
                 )));
             }
@@ -2823,6 +2850,43 @@ mod tests {
             metadata.schedules[0].get("workflow_name"),
             Some(&json!("scheduled_workflow"))
         );
+    }
+
+    #[test]
+    fn discovery_metadata_accepts_shared_secret_webhook_auth() {
+        let payload: PythonWorkflowDiscoveryPayload = serde_json::from_value(json!({
+            "workflows": [
+                {
+                    "workflow_name": "opensre_alertmanager",
+                    "source_path": "workflows/opensre_alertmanager.py",
+                    "webhooks": [
+                        {
+                            "workflow_name": "opensre_alertmanager",
+                            "source_path": "workflows/opensre_alertmanager.py",
+                            "spec": {
+                                "slug": "opensre-alertmanager",
+                                "provider": "opensre",
+                                "auth": {
+                                    "type": "shared_secret",
+                                    "secret_ref": "GRAFANA_ALERTMANAGER_WEBHOOK_TOKEN",
+                                    "header": "X-Phylax-OpenSRE-Token",
+                                    "fallback_secret_refs": [
+                                        "PHYLAX_OPENSRE_ALERTMANAGER_TOKEN"
+                                    ]
+                                }
+                            }
+                        }
+                    ]
+                }
+            ],
+        }))
+        .unwrap();
+        let metadata = metadata_from_discovery_payload(payload);
+        assert_eq!(metadata.webhooks.len(), 1);
+        assert!(matches!(
+            metadata.webhooks[0].spec.auth,
+            WorkflowWebhookAuth::SharedSecret { .. }
+        ));
     }
 
     #[test]

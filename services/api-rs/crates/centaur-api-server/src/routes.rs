@@ -516,11 +516,11 @@ fn decode_form_component(value: &str) -> String {
 
 fn safe_webhook_headers(headers: &HeaderMap, spec: &WorkflowWebhookSpec) -> Value {
     let mut safe = serde_json::Map::new();
-    let signature_header = signature_header_name(&spec.auth).map(|name| name.to_ascii_lowercase());
+    let auth_header = auth_header_name(&spec.auth).map(|name| name.to_ascii_lowercase());
     for (name, value) in headers {
         let normalized = name.as_str().to_ascii_lowercase();
         if REDACTED_WEBHOOK_HEADERS.contains(&normalized.as_str())
-            || signature_header.as_deref() == Some(normalized.as_str())
+            || auth_header.as_deref() == Some(normalized.as_str())
         {
             continue;
         }
@@ -584,6 +584,11 @@ fn verify_webhook_auth(
                 Err(ApiError::Unauthorized("invalid bearer token".to_owned()))
             }
         }
+        WorkflowWebhookAuth::SharedSecret {
+            secret_ref,
+            header,
+            fallback_secret_refs,
+        } => verify_shared_secret_header(secret_ref, header, fallback_secret_refs, headers),
         WorkflowWebhookAuth::Github { secret_ref } => verify_hmac_signature(
             "X-Hub-Signature-256",
             "sha256=",
@@ -606,6 +611,39 @@ fn verify_webhook_auth(
             headers,
             raw_body,
         ),
+    }
+}
+
+fn verify_shared_secret_header(
+    secret_ref: &str,
+    header: &str,
+    fallback_secret_refs: &[String],
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    let Some(actual) = header_value(headers, header) else {
+        return Err(ApiError::Unauthorized("missing webhook token".to_owned()));
+    };
+    let secrets = std::iter::once(secret_ref)
+        .chain(fallback_secret_refs.iter().map(String::as_str))
+        .filter_map(|secret_ref| {
+            env::var(secret_ref)
+                .ok()
+                .filter(|secret| !secret.trim().is_empty())
+        })
+        .collect::<Vec<_>>();
+    if secrets.is_empty() {
+        return Err(ApiError::Internal(format!(
+            "webhook auth secret {secret_ref} is not configured"
+        )));
+    }
+    let actual = actual.trim().as_bytes();
+    if secrets
+        .iter()
+        .any(|expected| constant_time_eq(actual, expected.trim().as_bytes()))
+    {
+        Ok(())
+    } else {
+        Err(ApiError::Unauthorized("invalid webhook token".to_owned()))
     }
 }
 
@@ -656,13 +694,14 @@ fn constant_time_eq(actual: &[u8], expected: &[u8]) -> bool {
     actual.ct_eq(expected).into()
 }
 
-fn signature_header_name(auth: &WorkflowWebhookAuth) -> Option<&str> {
+fn auth_header_name(auth: &WorkflowWebhookAuth) -> Option<&str> {
     match auth {
         WorkflowWebhookAuth::None | WorkflowWebhookAuth::Bearer { .. } => None,
         WorkflowWebhookAuth::Github { .. } => Some("X-Hub-Signature-256"),
         WorkflowWebhookAuth::Hmac {
             signature_header, ..
         } => Some(signature_header),
+        WorkflowWebhookAuth::SharedSecret { header, .. } => Some(header),
     }
 }
 
@@ -705,6 +744,27 @@ mod webhook_tests {
                 algorithm: "sha256".to_owned(),
                 signature_prefix: "sha256=".to_owned(),
                 encoding: "hex".to_owned(),
+            },
+            trigger_key: None,
+            allowed_methods: vec!["POST".to_owned()],
+            allowed_content_types: vec!["application/json".to_owned()],
+        };
+        let safe = safe_webhook_headers(&headers, &spec);
+        assert_eq!(safe, json!({"x-test-delivery": "delivery-1"}));
+    }
+
+    #[test]
+    fn redacts_shared_secret_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-phylax-opensre-token", "secret".parse().unwrap());
+        headers.insert("x-test-delivery", "delivery-1".parse().unwrap());
+        let spec = WorkflowWebhookSpec {
+            slug: "unit".to_owned(),
+            provider: None,
+            auth: WorkflowWebhookAuth::SharedSecret {
+                secret_ref: "TEST_WEBHOOK_SECRET".to_owned(),
+                header: "X-Phylax-OpenSRE-Token".to_owned(),
+                fallback_secret_refs: vec![],
             },
             trigger_key: None,
             allowed_methods: vec!["POST".to_owned()],
@@ -804,6 +864,39 @@ mod webhook_tests {
             raw_body,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn verifies_shared_secret_header_with_fallback() {
+        let primary_ref = "CENTRAUR_TEST_WEBHOOK_PRIMARY_TOKEN";
+        let fallback_ref = "CENTRAUR_TEST_WEBHOOK_FALLBACK_TOKEN";
+        unsafe {
+            env::remove_var(primary_ref);
+            env::set_var(fallback_ref, "fallback-token");
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert("x-phylax-opensre-token", "fallback-token".parse().unwrap());
+        verify_shared_secret_header(
+            primary_ref,
+            "X-Phylax-OpenSRE-Token",
+            &[fallback_ref.to_owned()],
+            &headers,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rejects_invalid_shared_secret_header() {
+        let secret_ref = "CENTRAUR_TEST_WEBHOOK_TOKEN_REJECT";
+        unsafe {
+            env::set_var(secret_ref, "expected-token");
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert("x-phylax-opensre-token", "wrong-token".parse().unwrap());
+        let error =
+            verify_shared_secret_header(secret_ref, "X-Phylax-OpenSRE-Token", &[], &headers)
+                .unwrap_err();
+        assert!(matches!(error, ApiError::Unauthorized(_)));
     }
 
     #[test]
