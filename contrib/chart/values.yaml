@@ -47,6 +47,9 @@ toolServer:
   ref: ""
   # Subdirectory in the repo holding the tools tree (mounted at /app/tools).
   subdir: tools
+  # Subdirectory in the repo holding Python workflow modules. Defaults to the
+  # upstream top-level workflows directory.
+  workflowSubdir: workflows
   # Additional repo/subdir sources copied after the base tools source. Later
   # sources shadow earlier ones when tool directory names collide. These repos
   # are cached automatically when repoCache.enabled=true.
@@ -54,6 +57,7 @@ toolServer:
   # - repo: tempoxyz/centaur-tempo
   #   ref: ""
   #   subdir: tools
+  #   workflowSubdir: workflows
   # Git-capable image the clone init container runs in; empty fields fall back to
   # sandbox.image (which carries git).
   runnerImage:

@@ -569,6 +569,14 @@ struct SandboxArgs {
     workflow_host_image: Option<String>,
     #[arg(long = "workflow-host-command", env = "WORKFLOW_HOST_COMMAND")]
     workflow_host_command: Option<String>,
+    #[arg(long = "workflow-host-bind-mounts", env = "WORKFLOW_HOST_BIND_MOUNTS")]
+    workflow_host_bind_mounts: Option<String>,
+    #[arg(
+        long = "kubernetes-workflow-subdir",
+        env = "KUBERNETES_WORKFLOW_SUBDIR",
+        default_value = "workflows"
+    )]
+    workflow_subdir: String,
     #[command(flatten)]
     tools_source: ToolsArgs,
     #[arg(
@@ -769,6 +777,9 @@ impl SandboxArgs {
                 .read_only(),
             );
         }
+        for mount in self.workflow_host_bind_mounts()? {
+            spec = spec.mount(mount);
+        }
         for (name, value) in self.workflow_host_env_template()? {
             upsert_spec_env(&mut spec, name, value);
         }
@@ -780,9 +791,25 @@ impl SandboxArgs {
 
     fn agent_k8s_workflow_dirs(&self) -> String {
         if let Some(repo) = clean_optional_value(self.tools_source.repo.as_deref()) {
-            return format!("{SANDBOX_REPOS_MOUNT_PATH}/{repo}/workflows");
+            let workflow_subdir = clean_optional_value(Some(self.workflow_subdir.as_str()))
+                .unwrap_or_else(|| "workflows".to_owned());
+            return repo_subdir_path(SANDBOX_REPOS_MOUNT_PATH, &repo, &workflow_subdir);
         }
         "/opt/centaur/workflows".to_owned()
+    }
+
+    fn workflow_host_bind_mounts(&self) -> Result<Vec<Mount>, ServerError> {
+        let Some(value) = clean_optional_value(self.workflow_host_bind_mounts.as_deref()) else {
+            return Ok(Vec::new());
+        };
+        let mounts: Vec<WorkflowHostBindMountArg> =
+            serde_json::from_str(&value).map_err(|err| {
+                ServerError::UnsupportedConfig(format!("invalid WORKFLOW_HOST_BIND_MOUNTS: {err}"))
+            })?;
+        mounts
+            .into_iter()
+            .map(WorkflowHostBindMountArg::into_mount)
+            .collect()
     }
 
     fn default_workflow_host_path(&self) -> String {
@@ -1316,6 +1343,36 @@ struct ToolSourceArg {
     subdir: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct WorkflowHostBindMountArg {
+    source_path: String,
+    target_path: String,
+    #[serde(default)]
+    read_only: bool,
+}
+
+impl WorkflowHostBindMountArg {
+    fn into_mount(self) -> Result<Mount, ServerError> {
+        let source_path =
+            clean_optional_value(Some(self.source_path.as_str())).ok_or_else(|| {
+                ServerError::UnsupportedConfig(
+                    "WORKFLOW_HOST_BIND_MOUNTS entries require source_path".to_owned(),
+                )
+            })?;
+        let target_path =
+            clean_optional_value(Some(self.target_path.as_str())).ok_or_else(|| {
+                ServerError::UnsupportedConfig(
+                    "WORKFLOW_HOST_BIND_MOUNTS entries require target_path".to_owned(),
+                )
+            })?;
+        let mut mount = Mount::new(MountKind::Bind { source_path }, target_path);
+        if self.read_only {
+            mount = mount.read_only();
+        }
+        Ok(mount)
+    }
+}
+
 impl ToolSourceArg {
     fn into_source(self) -> Option<ToolSource> {
         Some(ToolSource {
@@ -1697,6 +1754,15 @@ fn clean_optional_value(value: Option<&str>) -> Option<String> {
     non_empty(value).map(ToOwned::to_owned)
 }
 
+fn repo_subdir_path(root: &str, repo: &str, subdir: &str) -> String {
+    let subdir = subdir.trim_matches('/');
+    if subdir.is_empty() || subdir == "." {
+        format!("{root}/{repo}")
+    } else {
+        format!("{root}/{repo}/{subdir}")
+    }
+}
+
 fn upsert_spec_env(spec: &mut SandboxSpec, name: String, value: String) {
     if let Some(existing) = spec.env.iter_mut().find(|env| env.name == name) {
         existing.value = value;
@@ -1900,6 +1966,12 @@ mod tests {
             "disabled",
             "--repos-path",
             "/var/lib/centaur/repos",
+            "--kubernetes-tools-repo",
+            "paradigmxyz/centaur",
+            "--kubernetes-workflow-subdir",
+            "overlay/workflows",
+            "--workflow-host-bind-mounts",
+            r#"[{"source_path":"/var/lib/opensre-runs","target_path":"/var/lib/opensre-runs"}]"#,
             "--tools-path",
             "/home/agent/github/paradigmxyz/centaur/tools",
             "--tools-overlay-path",
@@ -1919,6 +1991,21 @@ mod tests {
                         source_path: "/var/lib/centaur/repos".to_owned(),
                     }
         }));
+        assert!(spec.mounts.iter().any(|mount| {
+            mount.target_path == "/var/lib/opensre-runs"
+                && !mount.read_only
+                && mount.kind
+                    == MountKind::Bind {
+                        source_path: "/var/lib/opensre-runs".to_owned(),
+                    }
+        }));
+        assert_eq!(
+            spec.env
+                .iter()
+                .find(|env| env.name == "WORKFLOW_DIRS")
+                .map(|env| env.value.as_str()),
+            Some("/home/agent/github/paradigmxyz/centaur/overlay/workflows")
+        );
         assert_eq!(
             spec.env
                 .iter()

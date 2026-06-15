@@ -9,11 +9,13 @@
 {{- $workflowDirs := "/app/workflows" -}}
 {{- if $toolsUseRepoCache -}}
 {{- $toolDirs = list (printf "%s/%s/%s" .Values.repoCache.hostPath .Values.toolServer.repo .Values.toolServer.subdir) -}}
-{{- $workflowDirList := list (printf "%s/%s/workflows" .Values.repoCache.hostPath .Values.toolServer.repo) -}}
+{{- $workflowSubdir := default "workflows" .Values.toolServer.workflowSubdir -}}
+{{- $workflowDirList := list (printf "%s/%s/%s" .Values.repoCache.hostPath .Values.toolServer.repo $workflowSubdir) -}}
 {{- range .Values.toolServer.extraSources }}
 {{- $sourceSubdir := default "tools" .subdir -}}
+{{- $sourceWorkflowSubdir := default "workflows" .workflowSubdir -}}
 {{- $toolDirs = append $toolDirs (printf "%s/%s/%s" $.Values.repoCache.hostPath .repo $sourceSubdir) -}}
-{{- $workflowDirList = append $workflowDirList (printf "%s/%s/workflows" $.Values.repoCache.hostPath .repo) -}}
+{{- $workflowDirList = append $workflowDirList (printf "%s/%s/%s" $.Values.repoCache.hostPath .repo $sourceWorkflowSubdir) -}}
 {{- end -}}
 {{- $workflowDirs = join ":" $workflowDirList -}}
 {{- end -}}
@@ -253,6 +255,8 @@ spec:
 {{- end }}
             - name: KUBERNETES_TOOLS_SUBDIR
               value: {{ .Values.toolServer.subdir | quote }}
+            - name: KUBERNETES_WORKFLOW_SUBDIR
+              value: {{ default "workflows" .Values.toolServer.workflowSubdir | quote }}
 {{- with .Values.toolServer.extraSources }}
             - name: KUBERNETES_TOOLS_EXTRA_SOURCES
               value: {{ toJson . | quote }}

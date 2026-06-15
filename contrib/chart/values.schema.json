@@ -48,6 +48,7 @@
         "repo": { "type": "string" },
         "ref": { "type": "string" },
         "subdir": { "type": "string" },
+        "workflowSubdir": { "type": "string" },
         "extraSources": {
           "type": "array",
           "items": {
@@ -55,7 +56,8 @@
             "properties": {
               "repo": { "type": "string" },
               "ref": { "type": "string" },
-              "subdir": { "type": "string" }
+              "subdir": { "type": "string" },
+              "workflowSubdir": { "type": "string" }
             },
             "required": ["repo"]
           }
