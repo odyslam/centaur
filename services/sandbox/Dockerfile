@@ -31,6 +31,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     python-pptx==1.0.2 openpyxl==3.1.5 PyMuPDF==1.27.2 mammoth==1.12.0 \
     faster-whisper \
     asyncpg==0.30.0 \
+    PyYAML==6.0.2 \
     opentelemetry-proto==1.42.1 \
     && find /usr/local/lib/python3.12 /usr/lib/python3 -type d -name __pycache__ -prune -exec rm -rf '{}' +
 
