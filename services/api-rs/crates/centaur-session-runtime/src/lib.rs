@@ -49,6 +49,7 @@ const EVENT_STREAM_SAFETY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const STEERING_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STEERING_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
 const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
+const TERMINAL_OUTPUT_TOMBSTONE_LIMIT: usize = 1024;
 
 type SandboxSpecFactory = Arc<
     dyn Fn(&ThreadKey, &str, &HarnessType, Option<&PersonaContext>) -> SandboxSpec + Send + Sync,
@@ -2607,6 +2608,9 @@ struct StdoutPumpState {
     first_token_recorded_by_execution: HashSet<String>,
     turn_execution_by_id: HashMap<String, String>,
     item_execution_by_id: HashMap<String, String>,
+    terminal_turn_ids: HashSet<String>,
+    terminal_item_ids: HashSet<String>,
+    terminal_id_order: VecDeque<TerminalIdentifier>,
     tool_call_by_id: HashMap<String, ToolCallLabels>,
     stdout_span_by_execution: HashMap<String, Span>,
 }
@@ -2620,6 +2624,10 @@ impl StdoutPumpState {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             return active_execution_id.map(ToOwned::to_owned);
         };
+
+        if self.is_known_terminal_value(&value) {
+            return None;
+        }
 
         if let Some(known_execution_id) = self.known_execution_for_value(&value) {
             if active_execution_id == Some(known_execution_id.as_str()) {
@@ -2635,6 +2643,7 @@ impl StdoutPumpState {
             )
             .is_some()
             {
+                self.remember_terminal_value(&value);
                 self.forget(&known_execution_id);
             }
             return None;
@@ -2657,13 +2666,17 @@ impl StdoutPumpState {
                 FinalAnswerTextUpdate::Replace(canonical) => *text = canonical,
             }
         }
-        terminal_output(
+        let terminal = terminal_output(
             &value,
             self.final_answer_text_by_execution
                 .get(execution_id)
                 .map(String::as_str)
                 .unwrap_or(""),
-        )
+        );
+        if terminal.is_some() {
+            self.remember_terminal_value(&value);
+        }
+        terminal
     }
 
     fn should_record_first_token(&self, execution_id: &str, value: Option<&Value>) -> bool {
@@ -2771,6 +2784,52 @@ impl StdoutPumpState {
                 .insert(item_id, execution_id.to_owned());
         }
     }
+
+    fn is_known_terminal_value(&self, value: &Value) -> bool {
+        turn_ids(value)
+            .into_iter()
+            .any(|turn_id| self.terminal_turn_ids.contains(&turn_id))
+            || item_ids(value)
+                .into_iter()
+                .any(|item_id| self.terminal_item_ids.contains(&item_id))
+    }
+
+    fn remember_terminal_value(&mut self, value: &Value) {
+        for turn_id in turn_ids(value) {
+            self.remember_terminal_id(TerminalIdentifier::Turn(turn_id));
+        }
+        for item_id in item_ids(value) {
+            self.remember_terminal_id(TerminalIdentifier::Item(item_id));
+        }
+    }
+
+    fn remember_terminal_id(&mut self, id: TerminalIdentifier) {
+        let inserted = match &id {
+            TerminalIdentifier::Turn(turn_id) => self.terminal_turn_ids.insert(turn_id.clone()),
+            TerminalIdentifier::Item(item_id) => self.terminal_item_ids.insert(item_id.clone()),
+        };
+        if !inserted {
+            return;
+        }
+        self.terminal_id_order.push_back(id);
+        while self.terminal_id_order.len() > TERMINAL_OUTPUT_TOMBSTONE_LIMIT {
+            match self.terminal_id_order.pop_front() {
+                Some(TerminalIdentifier::Turn(turn_id)) => {
+                    self.terminal_turn_ids.remove(&turn_id);
+                }
+                Some(TerminalIdentifier::Item(item_id)) => {
+                    self.terminal_item_ids.remove(&item_id);
+                }
+                None => break,
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TerminalIdentifier {
+    Turn(String),
+    Item(String),
 }
 
 fn new_stdout_pump_span(
@@ -3778,6 +3837,16 @@ fn result_is_failure(value: &Value) -> bool {
 }
 
 fn terminal_error_text(value: &Value) -> String {
+    for path in [
+        &["params", "error", "message"][..],
+        &["params", "turn", "error", "message"][..],
+        &["turn", "error", "message"][..],
+        &["error", "message"][..],
+    ] {
+        if let Some(text) = string_at_path(value, path) {
+            return text;
+        }
+    }
     for key in ["error", "message", "result", "text"] {
         if let Some(text) = value.get(key).and_then(Value::as_str)
             && !text.trim().is_empty()
@@ -4900,6 +4969,41 @@ mod tests {
         );
         assert_eq!(state.execution_for_line(None, delta), None);
         assert_eq!(state.execution_for_line(Some("exe-new"), delta), None);
+    }
+
+    #[test]
+    fn stdout_state_ignores_delayed_terminal_event_after_failed_turn() {
+        let mut state = StdoutPumpState::default();
+        let old_started = r#"{"method":"turn/started","params":{"turn":{"id":"turn-old","status":"inProgress"}}}"#;
+        let compact_error = r#"{"method":"error","params":{"error":{"message":"Error running remote compact task: unexpected status 502 Bad Gateway"},"threadId":"thread-1","turnId":"turn-old","willRetry":false}}"#;
+        let delayed_completed = r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-old","status":"failed","error":{"message":"Error running remote compact task: unexpected status 502 Bad Gateway"}}}}"#;
+        let new_started = r#"{"method":"turn/started","params":{"turn":{"id":"turn-new","status":"inProgress"}}}"#;
+
+        assert_eq!(
+            state.execution_for_line(Some("exe-old"), old_started),
+            Some("exe-old".to_owned())
+        );
+        assert_eq!(
+            state.execution_for_line(Some("exe-old"), compact_error),
+            Some("exe-old".to_owned())
+        );
+        assert_eq!(
+            state.observe("exe-old", compact_error),
+            Some(TerminalOutput::Failed {
+                error: "Error running remote compact task: unexpected status 502 Bad Gateway"
+                    .to_owned()
+            })
+        );
+        state.forget("exe-old");
+
+        assert_eq!(
+            state.execution_for_line(Some("exe-new"), delayed_completed),
+            None
+        );
+        assert_eq!(
+            state.execution_for_line(Some("exe-new"), new_started),
+            Some("exe-new".to_owned())
+        );
     }
 
     #[test]
