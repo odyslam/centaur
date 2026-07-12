@@ -75,3 +75,39 @@ def test_project_execution_observations_and_summary_roll_up_usage_and_tools():
     assert summary["cost_usd"] == 0.123
     assert summary["models"] == ["claude-sonnet"]
     assert summary["tool_calls_by_name"] == {"web_search": 1}
+
+
+def test_model_attestation_reaches_execution_summary_without_usage_counts():
+    accumulator = ExecutionObservationAccumulator()
+    event = {
+        "type": "model.attestation",
+        "model": "gpt-5.6-luna",
+        "model_provider": "openai",
+        "reasoning_effort": "high",
+        "source": "thread_start",
+    }
+
+    projected = project_execution_observations(event, **_context())
+    for event_kind, payload in projected:
+        accumulator.observe(event_kind, payload)
+    summary = accumulator.build_summary(
+        **_context(),
+        status="completed",
+        terminal_reason="completed",
+    )
+
+    assert projected == [
+        (
+            "model_attested",
+            {
+                **_context(),
+                "type": "obs.model_attestation",
+                "model": "gpt-5.6-luna",
+                "model_provider": "openai",
+                "reasoning_effort": "high",
+                "source": "thread_start",
+            },
+        )
+    ]
+    assert summary["models"] == ["gpt-5.6-luna"]
+    assert summary["total_tokens"] == 0

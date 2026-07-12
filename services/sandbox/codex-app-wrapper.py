@@ -38,6 +38,9 @@ EVENTS: queue.Queue[dict[str, Any] | None] = queue.Queue()
 INPUTS: queue.Queue[dict[str, Any] | None] = queue.Queue()
 THREAD_ID: str | None = None
 ACTIVE_TURN_ID: str | None = None
+EFFECTIVE_MODEL: str | None = None
+EFFECTIVE_MODEL_PROVIDER: str | None = None
+EFFECTIVE_REASONING_EFFORT: str | None = None
 SHUTTING_DOWN = False
 CONFIGURED_OTEL_TRACE_ID: str | None = None
 CONFIGURED_TRACE_CONTEXT_ID: str | None = None
@@ -671,6 +674,40 @@ def configure_trace_context_for_startup(trace_id: str | None) -> None:
     CONFIGURED_TRACE_CONTEXT_ID = trace_id
 
 
+def _set_effective_model(
+    model: Any,
+    *,
+    provider: Any = None,
+    reasoning_effort: Any = None,
+    source: str,
+) -> None:
+    """Persist and emit the model attested by Codex app-server itself."""
+    global EFFECTIVE_MODEL, EFFECTIVE_MODEL_PROVIDER, EFFECTIVE_REASONING_EFFORT
+    normalized_model = str(model or "").strip()
+    if not normalized_model:
+        return
+    normalized_provider = str(provider or "").strip() or EFFECTIVE_MODEL_PROVIDER
+    normalized_effort = str(reasoning_effort or "").strip() or EFFECTIVE_REASONING_EFFORT
+    changed = (
+        normalized_model != EFFECTIVE_MODEL
+        or normalized_provider != EFFECTIVE_MODEL_PROVIDER
+        or normalized_effort != EFFECTIVE_REASONING_EFFORT
+    )
+    EFFECTIVE_MODEL = normalized_model
+    EFFECTIVE_MODEL_PROVIDER = normalized_provider
+    EFFECTIVE_REASONING_EFFORT = normalized_effort
+    if changed:
+        emit(
+            {
+                "type": "model.attestation",
+                "model": EFFECTIVE_MODEL,
+                "model_provider": EFFECTIVE_MODEL_PROVIDER,
+                "reasoning_effort": EFFECTIVE_REASONING_EFFORT,
+                "source": source,
+            }
+        )
+
+
 def start_or_resume_thread() -> str:
     global THREAD_ID
     if THREAD_ID:
@@ -689,6 +726,12 @@ def start_or_resume_thread() -> str:
     thread = result.get("thread") or {}
     THREAD_ID = str(thread.get("id") or resume or uuid.uuid4())
     emit({"type": "thread.started", "thread_id": THREAD_ID})
+    _set_effective_model(
+        result.get("model") or thread.get("model"),
+        provider=result.get("modelProvider") or thread.get("modelProvider"),
+        reasoning_effort=result.get("reasoningEffort") or thread.get("reasoningEffort"),
+        source="thread_resume" if resume else "thread_start",
+    )
     return THREAD_ID
 
 
@@ -703,6 +746,14 @@ def emit_notification(msg: dict[str, Any]) -> bool:
         if tid:
             THREAD_ID = str(tid)
             emit({"type": "thread.started", "thread_id": THREAD_ID})
+        return False
+
+    if method == "model/rerouted":
+        _set_effective_model(
+            params.get("toModel") or params.get("model"),
+            provider=params.get("modelProvider"),
+            source="model_rerouted",
+        )
         return False
 
     if method == "turn/started":
@@ -755,6 +806,9 @@ def emit_notification(msg: dict[str, Any]) -> bool:
                 "type": "turn.completed",
                 "turn": turn,
                 "usage": params.get("usage") or turn.get("usage"),
+                "model": EFFECTIVE_MODEL,
+                "model_provider": EFFECTIVE_MODEL_PROVIDER,
+                "reasoning_effort": EFFECTIVE_REASONING_EFFORT,
             }
         )
         ACTIVE_TURN_ID = None

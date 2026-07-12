@@ -69,6 +69,23 @@ def test_elapsed_since_falls_back_when_start_looks_like_epoch_time() -> None:
         assert _elapsed_since(1000.0) == 5.2
 
 
+def test_codex_turn_failure_is_a_terminal_error() -> None:
+    from api.agent import _terminal_error_from_harness_event
+
+    assert (
+        _terminal_error_from_harness_event(
+            {
+                "type": "turn.failed",
+                "error": {
+                    "message": "Model not found",
+                    "additionalDetails": "backend alias rejected",
+                },
+            }
+        )
+        == "Model not found"
+    )
+
+
 @pytest.mark.asyncio
 async def test_stream_stdout_reattaches_when_running_eof() -> None:
     from api.agent import _stream_stdout
@@ -185,7 +202,13 @@ async def test_reconcile_tick_falls_back_to_gone_when_suspended_missing() -> Non
 
     rows = [{"thread_key": "thread-1", "sandbox_id": "sandbox-1", "state": "running"}]
     pool = AsyncMock()
-    pool.fetch = AsyncMock(side_effect=[rows, []])
+
+    async def _fetch(query: str, *_args):
+        if "WHERE state IN ('running', 'idle', 'delivering', 'error')" in query:
+            return rows
+        return []
+
+    pool.fetch = AsyncMock(side_effect=_fetch)
 
     async def _execute(query: str, *args):
         if "SET state = 'suspended'" in query:

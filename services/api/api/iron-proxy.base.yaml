@@ -35,6 +35,8 @@ transforms:
         - "openai-organization"
         - "openai-project"
         - "chatgpt-account-id"
+        - "originator"
+        - "version"
         - "x-request-id"
         - "x-stainless-arch"
         - "x-stainless-os"

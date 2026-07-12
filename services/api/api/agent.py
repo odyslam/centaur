@@ -1085,7 +1085,7 @@ def _terminal_error_from_harness_event(event: dict) -> str | None:
     """Return terminal error text when an end-of-turn event represents failure."""
     event_type = event.get("type")
 
-    if event_type == "error":
+    if event_type in {"error", "turn.failed"}:
         err = event.get("error")
         if isinstance(err, str) and err.strip():
             return err.strip()

@@ -137,6 +137,16 @@ class TestCodex:
         }
         assert normalize_harness_event("codex", event) == [event]
 
+    def test_model_attestation_passthrough(self):
+        event = {
+            "type": "model.attestation",
+            "model": "gpt-5.6-luna",
+            "model_provider": "openai",
+            "reasoning_effort": "high",
+            "source": "thread_start",
+        }
+        assert normalize_harness_event("codex", event) == [event]
+
     def test_command_execution_camel_case_item(self):
         event = {
             "type": "item.completed",

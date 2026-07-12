@@ -243,6 +243,24 @@ def project_execution_observations(
         )
         return observations
 
+    if event_type == "model.attestation":
+        model = _as_str(event.get("model")).strip()
+        if model:
+            observations.append(
+                (
+                    "model_attested",
+                    {
+                        **base,
+                        "type": "obs.model_attestation",
+                        "model": model,
+                        "model_provider": _as_str(event.get("model_provider")) or None,
+                        "reasoning_effort": _as_str(event.get("reasoning_effort")) or None,
+                        "source": _as_str(event.get("source")) or None,
+                    },
+                )
+            )
+        return observations
+
     if event_type == "reasoning":
         observations.append(
             (
@@ -434,6 +452,10 @@ class ExecutionObservationAccumulator:
             self.cache_creation_input_tokens += _as_int(payload.get("cache_creation_input_tokens"))
             self.cache_read_input_tokens += _as_int(payload.get("cache_read_input_tokens"))
             self.total_cost_usd += _as_float(payload.get("cost_usd"))
+            model = _as_str(payload.get("model"))
+            if model:
+                self.models.add(model)
+        elif event_kind == "model_attested":
             model = _as_str(payload.get("model"))
             if model:
                 self.models.add(model)

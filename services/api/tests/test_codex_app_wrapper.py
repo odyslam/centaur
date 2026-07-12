@@ -344,6 +344,73 @@ def test_emit_notification_collects_agent_message_delta_output(monkeypatch) -> N
     assert emitted[0]["type"] == "item.agentMessage.delta"
 
 
+def test_thread_start_emits_app_server_model_attestation(monkeypatch) -> None:
+    wrapper = _load_wrapper()
+    emitted: list[dict] = []
+    monkeypatch.setattr(wrapper, "emit", emitted.append)
+    monkeypatch.setattr(
+        wrapper,
+        "request",
+        lambda *_args, **_kwargs: {
+            "thread": {"id": "thread-123"},
+            "model": "gpt-5.6-luna",
+            "modelProvider": "openai",
+            "reasoningEffort": "high",
+        },
+    )
+    wrapper.THREAD_ID = None
+    wrapper.EFFECTIVE_MODEL = None
+    wrapper.EFFECTIVE_MODEL_PROVIDER = None
+    wrapper.EFFECTIVE_REASONING_EFFORT = None
+
+    assert wrapper.start_or_resume_thread() == "thread-123"
+
+    assert emitted == [
+        {"type": "thread.started", "thread_id": "thread-123"},
+        {
+            "type": "model.attestation",
+            "model": "gpt-5.6-luna",
+            "model_provider": "openai",
+            "reasoning_effort": "high",
+            "source": "thread_start",
+        },
+    ]
+
+
+def test_model_reroute_is_attested_and_terminal_event_uses_effective_model(
+    monkeypatch,
+) -> None:
+    wrapper = _load_wrapper()
+    emitted: list[dict] = []
+    monkeypatch.setattr(wrapper, "emit", emitted.append)
+    wrapper.EFFECTIVE_MODEL = "gpt-5.6-luna"
+    wrapper.EFFECTIVE_MODEL_PROVIDER = "openai"
+    wrapper.EFFECTIVE_REASONING_EFFORT = "high"
+
+    assert wrapper.emit_notification(
+        {
+            "method": "model/rerouted",
+            "params": {"fromModel": "gpt-5.6-luna", "toModel": "gpt-5.6-sol"},
+        }
+    ) is False
+    assert wrapper.emit_notification(
+        {
+            "method": "turn/completed",
+            "params": {"turn": {"id": "turn-1"}, "usage": {"input_tokens": 10}},
+        }
+    ) is True
+
+    assert emitted[0] == {
+        "type": "model.attestation",
+        "model": "gpt-5.6-sol",
+        "model_provider": "openai",
+        "reasoning_effort": "high",
+        "source": "model_rerouted",
+    }
+    assert emitted[1]["model"] == "gpt-5.6-sol"
+    assert emitted[1]["reasoning_effort"] == "high"
+
+
 def test_main_lazy_starts_app_server_after_input(monkeypatch) -> None:
     wrapper = _load_wrapper()
     requests: list[tuple[str, dict]] = []

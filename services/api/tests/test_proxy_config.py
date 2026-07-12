@@ -883,13 +883,16 @@ def test_render_emits_header_and_gcp_auth_transforms(
     assert entry["rules"] == [{"host": "api.openai.com"}]
 
 
-def test_render_allows_project_access_token_header() -> None:
+def test_render_allows_required_control_plane_headers() -> None:
     cfg = yaml.safe_load(render_proxy_yaml([]))
     header_allowlist = next(
         t for t in cfg["transforms"] if t["name"] == "header_allowlist"
     )
 
-    assert "project-access-token" in header_allowlist["config"]["headers"]
+    headers = header_allowlist["config"]["headers"]
+    assert "project-access-token" in headers
+    assert "originator" in headers
+    assert "version" in headers
 
 
 def test_render_replace_secret_emits_query_and_path_locations(

@@ -624,6 +624,9 @@ def _normalize_codex_event(event: dict) -> list[dict]:
     if event_type == "assistant":
         return [event]
 
+    if event_type == "model.attestation":
+        return [event]
+
     if event_type == "error":
         return [
             {"type": "error", "error": _as_str(event.get("message")) or "Unknown error"}
