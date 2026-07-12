@@ -921,6 +921,38 @@ async def test_prompt_switch_clears_old_session_replay_state(db_pool):
 
 
 @pytest.mark.asyncio
+async def test_terminal_workflow_notification_releases_every_run_scoped_session(db_pool):
+    from api.workflow_engine import notify_workflow_run_terminal
+
+    run_id = f"wfr_{uuid.uuid4().hex[:16]}"
+    thread_keys = [
+        f"workflow:{run_id}:generator",
+        f"workflow:{run_id}:critic:0",
+    ]
+    for index, thread_key in enumerate(thread_keys):
+        await db_pool.execute(
+            "INSERT INTO sandbox_sessions (thread_key, sandbox_id, harness, engine, state) "
+            "VALUES ($1, $2, 'codex', 'codex', 'idle')",
+            thread_key,
+            f"sbx-{index}-{uuid.uuid4().hex[:8]}",
+        )
+    release_assignment = AsyncMock(return_value={"ok": True, "released": True})
+    with patch("api.workflow_engine.release_assignment", release_assignment):
+        woken = await notify_workflow_run_terminal(db_pool, run_id)
+
+    assert woken is False
+    assert release_assignment.await_count == 2
+    assert {call.kwargs["thread_key"] for call in release_assignment.await_args_list} == set(
+        thread_keys
+    )
+    assert all(
+        call.kwargs["release_id"] == f"workflow-terminal:{run_id}"
+        for call in release_assignment.await_args_list
+    )
+    assert all(call.kwargs["cancel_inflight"] is True for call in release_assignment.await_args_list)
+
+
+@pytest.mark.asyncio
 async def test_slack_thread_turn_without_flag_keeps_default_harness_path(db_pool):
     from api.workflow_engine import WorkflowContext
     from api.workflows.slack_thread_turn import Input, handler

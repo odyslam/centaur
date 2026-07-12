@@ -3051,6 +3051,66 @@ async def test_release_stale_runtime_assignments_preserves_undelivered_messages(
 
 
 @pytest.mark.asyncio
+async def test_release_without_active_assignment_stops_orphan_session(db_pool):
+    from api.runtime_control import release_assignment
+
+    thread_key = f"workflow:wfr_{uuid.uuid4().hex[:16]}:generator"
+    stop_session = AsyncMock(return_value=True)
+    with patch("api.runtime_control.stop_session", stop_session):
+        response = await release_assignment(
+            db_pool,
+            thread_key=thread_key,
+            release_id=f"rel-{uuid.uuid4().hex}",
+            cancel_inflight=False,
+        )
+
+    assert response["released"] is False
+    assert response["reason"] == "no_active_assignment"
+    stop_session.assert_awaited_once_with(thread_key)
+
+
+@pytest.mark.asyncio
+async def test_terminal_workflow_reaper_stops_session_and_releases_assignment(db_pool):
+    from api.agent import _stop_terminal_workflow_sessions
+
+    run_id = f"wfr_{uuid.uuid4().hex[:16]}"
+    thread_key = f"workflow:{run_id}:generator"
+    runtime_id = f"rt-{uuid.uuid4().hex[:8]}"
+    await db_pool.execute(
+        "INSERT INTO workflow_runs ("
+        "run_id, workflow_name, workflow_version, request_hash, root_run_id, status, input_json, completed_at"
+        ") VALUES ($1, 'test', 'v1', 'hash', $1, 'completed', '{}'::jsonb, NOW())",
+        run_id,
+    )
+    await db_pool.execute(
+        "INSERT INTO sandbox_sessions (thread_key, sandbox_id, harness, engine, state) "
+        "VALUES ($1, $2, 'codex', 'codex', 'idle')",
+        thread_key,
+        runtime_id,
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_runtime_assignments ("
+        "thread_key, assignment_generation, runtime_id, harness, engine, "
+        "persona_id, prompt_ref, effective_agents_md_sha256, state"
+        ") VALUES ($1, 1, $2, 'codex', 'codex', NULL, 'harness:codex', 'sha', 'active')",
+        thread_key,
+        runtime_id,
+    )
+    backend = SimpleNamespace(stop_by_id=AsyncMock())
+
+    stopped = await _stop_terminal_workflow_sessions(db_pool, backend)
+
+    assert stopped == 1
+    backend.stop_by_id.assert_awaited_once_with(runtime_id)
+    assert await db_pool.fetchval(
+        "SELECT state FROM sandbox_sessions WHERE thread_key = $1", thread_key
+    ) == "stopped"
+    assert await db_pool.fetchval(
+        "SELECT state FROM agent_runtime_assignments WHERE thread_key = $1", thread_key
+    ) == "released"
+
+
+@pytest.mark.asyncio
 async def test_worker_marks_silence_deadline_exceeded_and_stops_session(db_pool):
     from api.runtime_control import _process_execution
 

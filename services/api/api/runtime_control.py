@@ -1904,10 +1904,10 @@ async def release_assignment(
                 req_hash,
                 canonical_json(response),
             )
-    if response.get("released") and stop_runtime:
+    if stop_runtime:
         with contextlib.suppress(Exception):
             runtime_id = response.get("runtime_id")
-            if isinstance(runtime_id, str) and runtime_id:
+            if response.get("released") and isinstance(runtime_id, str) and runtime_id:
                 if stop_runtime_background:
                     from api.agent import stop_session_by_id
 
@@ -1929,6 +1929,9 @@ async def release_assignment(
 
                     await stop_session_by_id(runtime_id, thread_key=thread_key)
             else:
+                # Assignment GC can race ahead of its sandbox_sessions row and
+                # Pod. Release is still terminal for the thread, so stop that
+                # orphan too; the reconciler retries if the backend call fails.
                 await stop_session(thread_key)
     log.info(
         "thread_released",

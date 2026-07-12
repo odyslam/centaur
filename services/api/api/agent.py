@@ -1823,6 +1823,62 @@ async def _release_stale_runtime_assignments(pool, backend, *, limit: int = 500)
     return released
 
 
+async def _stop_terminal_workflow_sessions(pool, backend, *, limit: int = 500) -> int:
+    """Recover run-scoped sandboxes whose workflow is already terminal."""
+    rows = await pool.fetch(
+        "SELECT ss.thread_key, ss.sandbox_id "
+        "FROM sandbox_sessions ss "
+        "JOIN workflow_runs wr "
+        "  ON left(ss.thread_key, length('workflow:' || wr.run_id || ':')) "
+        "     = 'workflow:' || wr.run_id || ':' "
+        "WHERE wr.status IN ('completed', 'failed', 'cancelled') "
+        "  AND ss.state NOT IN ('stopped', 'gone') "
+        "ORDER BY wr.completed_at ASC NULLS FIRST "
+        "LIMIT $1",
+        max(1, min(limit, 500)),
+    )
+    stopped = 0
+    for row in rows:
+        thread_key = str(row["thread_key"])
+        sandbox_id = str(row["sandbox_id"])
+        try:
+            await backend.stop_by_id(sandbox_id)
+            await pool.execute(
+                "UPDATE sandbox_sessions "
+                "SET state = 'stopped', wire_lease_id = NULL, "
+                "    wire_connected_at = NULL, wire_last_seen_at = NULL, "
+                "    inflight_turn_id = NULL, inflight_turn_input = NULL, "
+                "    inflight_started_at = NULL, inflight_attempts = 0, "
+                "    updated_at = NOW() "
+                "WHERE thread_key = $1 AND sandbox_id = $2",
+                thread_key,
+                sandbox_id,
+            )
+            await pool.execute(
+                "UPDATE agent_runtime_assignments "
+                "SET state = 'released', released_at = COALESCE(released_at, NOW()), "
+                "    updated_at = NOW() "
+                "WHERE thread_key = $1 AND runtime_id = $2 AND state = 'active'",
+                thread_key,
+                sandbox_id,
+            )
+            _drop_runtime(sandbox_id)
+            stopped += 1
+            log.info(
+                "terminal_workflow_session_stopped",
+                thread_key=thread_key,
+                sandbox=sandbox_id[:12],
+            )
+        except Exception:
+            log.warning(
+                "terminal_workflow_session_stop_failed",
+                thread_key=thread_key,
+                sandbox=sandbox_id[:12],
+                exc_info=True,
+            )
+    return stopped
+
+
 async def reconcile_tick() -> None:
     """Periodic reconciliation: check DB vs backend, enforce idle TTL, clean orphans.
 
@@ -1857,6 +1913,15 @@ async def reconcile_tick() -> None:
                     "WHERE thread_key = $1",
                     thread_key,
                 )
+
+        # A terminal workflow cannot reuse its private workflow:{run_id}:*
+        # sessions. Stop them now instead of applying the interactive idle TTL.
+        terminal_stopped = await _stop_terminal_workflow_sessions(pool, backend)
+        if terminal_stopped:
+            log.info(
+                "terminal_workflow_session_gc_completed",
+                stopped=terminal_stopped,
+            )
 
         # Step A: Reconcile DB sessions against the active sandbox backend.
         rows = await pool.fetch(

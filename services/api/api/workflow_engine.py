@@ -51,6 +51,7 @@ from api.runtime_control import (
     enqueue_execution,
     get_active_assignment,
     get_execution,
+    release_assignment,
     request_hash,
     spawn_assignment,
 )
@@ -2900,6 +2901,7 @@ async def notify_execution_terminal(
 async def notify_workflow_run_terminal(
     pool, child_run_id: str,
 ) -> bool:
+    await _release_workflow_run_sessions(pool, child_run_id)
     rows = await pool.fetch(
         "SELECT DISTINCT r.run_id "
         "FROM workflow_checkpoints c "
@@ -2922,6 +2924,41 @@ async def notify_workflow_run_terminal(
         wake_workflow_worker()
         return True
     return False
+
+
+async def _release_workflow_run_sessions(pool, run_id: str) -> int:
+    """Stop every run-scoped agent session after its workflow becomes terminal."""
+    rows = await pool.fetch(
+        "SELECT thread_key FROM sandbox_sessions "
+        "WHERE left(thread_key, length($1)) = $1 "
+        "  AND state NOT IN ('stopped', 'gone')",
+        f"workflow:{run_id}:",
+    )
+    released = 0
+    for row in rows:
+        thread_key = str(row["thread_key"])
+        try:
+            await release_assignment(
+                pool,
+                thread_key=thread_key,
+                release_id=f"workflow-terminal:{run_id}",
+                cancel_inflight=True,
+            )
+            released += 1
+        except Exception:
+            log.warning(
+                "workflow_terminal_session_release_failed",
+                run_id=run_id,
+                thread_key=thread_key,
+                exc_info=True,
+            )
+    if released:
+        log.info(
+            "workflow_terminal_sessions_released",
+            run_id=run_id,
+            released=released,
+        )
+    return released
 
 
 async def send_workflow_event(
