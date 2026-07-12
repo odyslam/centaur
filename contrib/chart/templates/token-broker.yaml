@@ -1,3 +1,7 @@
+{{- $writableSecretSource := or (eq .Values.ironProxy.secretSource "onepassword") (eq .Values.ironProxy.secretSource "onepassword-connect") -}}
+{{- if and .Values.tokenBroker.enabled (not $writableSecretSource) }}
+{{- fail "tokenBroker.enabled requires ironProxy.secretSource=onepassword or onepassword-connect so rotated refresh tokens can be persisted" }}
+{{- end }}
 {{- if .Values.tokenBroker.enabled }}
 # iron-token-broker — owns the OAuth refresh-token state machine for any
 # OAuthTokenSecret with grant=refresh_token. Single-writer process; the API
