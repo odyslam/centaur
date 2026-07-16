@@ -49,6 +49,8 @@ CURRENT_TRACEPARENT: str | None = None
 OTEL_PROXY: ThreadingHTTPServer | None = None
 OTEL_PROXY_TARGET_ENDPOINT: str | None = None
 OTEL_PROXY_SPAN_PREFIX = "codex."
+APP_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 10.0
+APP_SERVER_TERMINATE_TIMEOUT_SECONDS = 5.0
 CURRENT_LLM_INPUT_TEXT = ""
 CURRENT_LLM_OUTPUT_TEXT = ""
 LLM_INPUTS_BY_TURN_ID: dict[str, str] = {}
@@ -930,8 +932,32 @@ def interrupt_active_turn(*_args: object) -> None:
 def exit_wrapper(*_args: object) -> None:
     global SHUTTING_DOWN
     SHUTTING_DOWN = True
-    if APP and APP.poll() is None:
+    INPUTS.put(None)
+    if APP and APP.poll() is None and APP.stdin:
+        try:
+            APP.stdin.close()
+        except OSError:
+            pass
+
+
+def stop_app_server() -> None:
+    if not APP or APP.poll() is not None:
+        return
+    if APP.stdin:
+        try:
+            APP.stdin.close()
+        except OSError:
+            pass
+    try:
+        APP.wait(timeout=APP_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
         APP.terminate()
+    try:
+        APP.wait(timeout=APP_SERVER_TERMINATE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        APP.kill()
+        APP.wait(timeout=APP_SERVER_TERMINATE_TIMEOUT_SECONDS)
 
 
 def main() -> None:
@@ -954,8 +980,7 @@ def main() -> None:
         time.sleep(0.01)
 
     exit_wrapper()
-    if APP:
-        APP.wait(timeout=10)
+    stop_app_server()
 
 
 if __name__ == "__main__":

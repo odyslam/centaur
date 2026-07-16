@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 from pathlib import Path
+import subprocess
 import tomllib
 from types import ModuleType
 import uuid
@@ -411,6 +413,71 @@ def test_model_reroute_is_attested_and_terminal_event_uses_effective_model(
     assert emitted[1]["reasoning_effort"] == "high"
 
 
+def test_stop_app_server_flushes_via_stdin_eof_before_terminate(monkeypatch) -> None:
+    wrapper = _load_wrapper()
+
+    class FakeProcess:
+        stdin = io.StringIO()
+        wait_calls: list[float] = []
+        terminated = False
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, timeout: float) -> int:
+            self.wait_calls.append(timeout)
+            return 0
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+    process = FakeProcess()
+    monkeypatch.setattr(wrapper, "APP", process)
+
+    wrapper.stop_app_server()
+
+    assert process.stdin.closed is True
+    assert process.wait_calls == [wrapper.APP_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS]
+    assert process.terminated is False
+
+
+def test_stop_app_server_escalates_after_graceful_shutdown_timeout(
+    monkeypatch,
+) -> None:
+    wrapper = _load_wrapper()
+
+    class FakeProcess:
+        stdin = io.StringIO()
+        wait_calls = 0
+        terminated = False
+        killed = False
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, timeout: float) -> int:
+            self.wait_calls += 1
+            if self.wait_calls < 3:
+                raise subprocess.TimeoutExpired("codex app-server", timeout)
+            return 0
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+
+    process = FakeProcess()
+    monkeypatch.setattr(wrapper, "APP", process)
+
+    wrapper.stop_app_server()
+
+    assert process.stdin.closed is True
+    assert process.terminated is True
+    assert process.killed is True
+    assert process.wait_calls == 3
+
+
 def test_main_lazy_starts_app_server_after_input(monkeypatch) -> None:
     wrapper = _load_wrapper()
     requests: list[tuple[str, dict]] = []
@@ -418,7 +485,7 @@ def test_main_lazy_starts_app_server_after_input(monkeypatch) -> None:
     emitted: list[dict] = []
 
     class FakeProcess:
-        stdin = object()
+        stdin = io.StringIO()
         stdout = object()
         stderr = object()
 
